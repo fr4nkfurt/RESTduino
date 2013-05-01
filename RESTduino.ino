@@ -1,11 +1,17 @@
-#include <aJSON.h>
 
-#define DEBUG true
+#define DEBUG false
+
+#define SWITCH_TYPE 0
+#define PWM_TYPE 1
+#define SENSOR_TEMPERATURA_TYPE 2
+
+
 
 #include <SPI.h>
 #include <Ethernet.h>
 #include <Bounce.h>
 #include <EEPROMEx.h>
+#include <dht11.h>
 
 byte mac[] = {
   0xDE, 0xAD, 0xBE, 0xEF, 0xFE, 0xED};
@@ -18,14 +24,16 @@ Server server(80);
 #endif
 
 int address = 10;
-const int numberOfInputs = 2 ;
+const int numberOfInputs = 4 ;
+int cantidadSwitchs = 0;
+int i = 0; //utilizada para los contadores
 typedef struct
 {
   int input;
   int output;
   int type;
   int state;
-  char name[20];
+  char name[15];
 }  
 input_type;
 
@@ -33,16 +41,24 @@ input_type config[numberOfInputs];
 
 Bounce *bouncer;
 
+dht11 DHT11;
+
 void loadConfig (){
   EEPROM.readBlock(address, config);
 #if DEBUG
-  Serial.println("Leyendo eprom."); 
-  for (int i = 0; i < numberOfInputs; i++) {
-    Serial.println(config[i].input); 
-    Serial.println(config[i].output);
-    Serial.println(config[i].type);
-    Serial.println(config[i].state); 
+  Serial.println("Ep read"); 
+  for ( i = 0; i < numberOfInputs; i++) {
+    Serial.print("n: ");  
     Serial.println(config[i].name);   
+    Serial.print("i: ");  
+    Serial.println(config[i].input); 
+    Serial.print("o: ");  
+    Serial.println(config[i].output);
+    Serial.print("t: ");  
+    Serial.println(config[i].type);
+    Serial.print("s: ");  
+    Serial.println(config[i].state); 
+    Serial.println("-");   
   }
 #endif
 
@@ -53,61 +69,83 @@ void createConfig () {
   config[0].output = 8;
   config[0].type = 0;
   config[0].state = 1;
-  String nombre = "luz techo";
-  nombre.toCharArray(config[0].name,20);
+  String nombre = "TechoLuz";
+  nombre.toCharArray(config[0].name,15);
 
-  config[1].input = 2;
+  config[1].input = 7;//
   config[1].output = 3;
   config[1].type = 1;
   config[1].state = 0;
-  nombre = "luz dimmer";
-  nombre.toCharArray(config[1].name,20);
+  nombre = "Dimm";
+  nombre.toCharArray(config[1].name,15);
 
-  
+  config[2].input = 2;
+  config[2].output = 9;//
+  config[2].type = 2;
+  config[2].state = 1;//
+  nombre = "Temp";
+  nombre.toCharArray(config[2].name,15);
+
+  config[3].input = 5;
+  config[3].output = 8;//
+  config[3].type = 0;
+  config[3].state = 1;//
+  nombre = "trc";
+  nombre.toCharArray(config[3].name,15);
+
+  nombre = "";//limpio string
 #if DEBUG
-    Serial.println("Escribiendo eprom."); 
+  Serial.println("ep wrt"); 
 #endif
 
   EEPROM.writeBlock(address, config);
 }
 
 String configToJson() {
+  loadConfig();
   String configStr = String();
   configStr += "{\"";
-  configStr += "config\" : [";
-  for (int i = 0; i < numberOfInputs; i++) {
-    configStr += "{\"input\":";
+  configStr += "conf\" : [";
+  for ( i = 0; i < numberOfInputs; i++) {
+    configStr += "{\"i\":";
     configStr += config[i].input;
     configStr += ",";
-    configStr += "\"output\":";
+    configStr += "\"o\":";
     configStr += config[i].output;
     configStr += ",";
-    configStr += "\"state\":";
+    configStr += "\"s\":";
     configStr += config[i].state;
     configStr += ",";
-    configStr += "\"type\":";
+    configStr += "\"t\":";
     configStr += config[i].type;
     configStr += ",";
-    configStr += "\"name\":\"";
+    configStr += "\"n\":\"";
     configStr += config[i].name;
     configStr += "\"}";
     if (i < (numberOfInputs - 1)){
-        configStr += ",";
+      configStr += ",";
     }
-  
-}
+
+  }
   configStr += "]}";
-  
+
+  //no se utiliza el nombre para la ejecucion del programa por eso se lo vuela de la sram
+  for ( i = 0; i < numberOfInputs; i++) {
+    memset(config[i].name , 0, sizeof config[i].name );
+  }
+  /*
 #if DEBUG
-  Serial.println("Config output: "); 
-  Serial.println(configStr);
-#endif
+   Serial.println("Config output: "); 
+   Serial.println(configStr);
+   #endif
+   */
   return configStr;
 }
 
+//usado para lo que llega por ethernet, porque fuerza estado
 void updateOutput(int pin, int state){
 
-  for (int i = 0; i < numberOfInputs; i++) {
+  for ( i = 0; i < numberOfInputs; i++) {
     if (config[i].output==pin){
       if (state){
         digitalWrite(pin, HIGH);
@@ -123,35 +161,85 @@ void updateOutput(int pin, int state){
   //EEPROM.updateBlock(address, config);
 }
 
+//usado para los switchs, que solo invierten
+void changeOutput(int pin){
+
+  for ( i = 0; i < numberOfInputs; i++) {
+    if (config[i].output==pin){
+      if (digitalRead(pin)){
+        digitalWrite(pin, LOW);
+        config[i].state=0;
+      }
+      else{
+        digitalWrite(pin, HIGH);
+        config[i].state=1;
+      }
+      return;      
+    }
+  }
+  //esta es la linea que hace que se guarden los estados en la eprom
+  //EEPROM.updateBlock(address, config);
+}
+
+void imprimirCabeceraHTTP(EthernetClient client, String type){
+  client.println("HTTP/1.1 200 OK");
+  client.print("Content-Type: application/");
+  client.println(type);
+  client.println("Access-Control-Allow-Origin: *");
+  client.println();
+}
+
+
 void setup()
 {
 #if DEBUG
   Serial.begin(9600);
   Serial.println("---"); 
 #endif
-  //createConfig(); 
+  createConfig(); 
   loadConfig ();
 
-  bouncer = (Bounce *) malloc(sizeof(Bounce) * numberOfInputs);
+  for ( i = 0; i < numberOfInputs; i++) {
+    //Se aprovecha el for para eliminar el name de la config en ejecucion
+    memset(config[i].name , 0, sizeof config[i].name );
+    if (config[i].type==SWITCH_TYPE){
+      cantidadSwitchs++;
+    }
+  }
+  bouncer = (Bounce *) malloc(sizeof(Bounce) * cantidadSwitchs);
 
+  int bouncerIndex=0;
   //Rutina de inicializacion de estado y configuracion
-  for (int i = 0; i < numberOfInputs; i++) {
-
-    pinMode(config[i].input , INPUT); 
+  for ( i = 0; i < numberOfInputs; i++) {
+    if (config[i].input!=-1){
+      pinMode(config[i].input , INPUT); 
+    }
     //digitalWrite(config[i].input, HIGH); //se utilizara el pull up resistor de 20k interno
-    pinMode(config[i].output, OUTPUT);  
-
-    if (config[i].type==0){
+    if (config[i].output!=-1){
+      pinMode(config[i].output, OUTPUT);  
+    }
+    if (config[i].type==SWITCH_TYPE){
       if (config[i].state){
-        digitalWrite(config[i].output, HIGH); 
-
+        digitalWrite(config[i].output, HIGH);
       } 
       else {
         digitalWrite(config[i].output, LOW); 
-
       }
-      bouncer[i] = Bounce( config[i].input,100 ); 
+      if (config[i].input!=-1){
+        bouncer[bouncerIndex] = Bounce( config[i].input,100 ); 
+        bouncerIndex++;
+      }
+
+    }
+    else  if (config[i].type==PWM_TYPE){
+      analogWrite(config[i].output, config[i].state);      
+
+    }
+    else  if (config[i].type==SENSOR_TEMPERATURA_TYPE){
+      DHT11.attach(config[i].input);
     }  
+
+
 
 
   }
@@ -166,33 +254,47 @@ void setup()
 }
 
 //  url buffer size
-#define BUFSIZE 128
-
+#define BUFSIZE 32
+#define BUFSIZE_PARAMS 80
 // Toggle case sensitivity
 #define CASESENSE true
 
 void loop()
 {
   //·····································Comienzo codigo input handling·····································//  
-  for (int i = 0; i < numberOfInputs; i++) {
+  for ( i = 0; i < cantidadSwitchs; i++) {
 
     if (bouncer[i].update()){
+      int indexAux=0;
+      int h;  
+      for ( h = 0; h < numberOfInputs; h++) {
+
+        if (config[h].type==SWITCH_TYPE){
+          if (indexAux==i){
+            changeOutput(config[h].output);
+
 #if DEBUG
-      Serial.println("cambio");
-#endif
-      if (bouncer[i].read()){
-        updateOutput(config[i].output, 1);     
+            Serial.print("Cambio en pin: ");
+            Serial.println(config[h].input);
+#endif  
+            return;
+          }
+          else{
+            indexAux++;
+          }  
+        }
       }
-      else{
-        updateOutput(config[i].output, 0);
-      }
+
+
+
+
     }
   }
 
 
   //·····································Comienzo codigo restDuino·····································//
   char clientline[BUFSIZE];
-  char paramsline[BUFSIZE];
+  char paramsline[BUFSIZE_PARAMS];
   int index = 0;
   // listen for incoming clients
 #if defined(ARDUINO) && ARDUINO >= 100
@@ -216,17 +318,17 @@ void loop()
           clientline[index++] = c;
           continue;
         } 
-        
-       
-       if (c == '?'){//HAY PARAMETROS
-         clientline[index++] = ' '; // Se agrega un espacio al final porque este caracter se usa para cortar el string luego, solo aplica para cuando hay parametros, con ? en el url
-         index = 0; 
-         c = client.read();
-         while (c != '\n' && c != '\r' && c != ' ' && index < BUFSIZE){   
-           paramsline[index++] = c;
+
+
+        if (c == '?'){//HAY PARAMETROS
+          clientline[index++] = ' '; // Se agrega un espacio al final porque este caracter se usa para cortar el string luego, solo aplica para cuando hay parametros, con ? en el url
+          index = 0; 
+          c = client.read();
+          while (c != '\n' && c != '\r' && c != ' ' && index < BUFSIZE){   
+            paramsline[index++] = c;
             c = client.read();
-         }  
-     }
+          }  
+        }
 
 
 #if DEBUG
@@ -251,19 +353,13 @@ void loop()
         //  string for further processing
         String urlString = String(clientline);
         String urlStringParams = String(paramsline);
-        
+
         //  extract the operation
         String op = urlString.substring(0,urlString.indexOf(' '));
 
         //  we're only interested in the first part...
         urlString = urlString.substring(urlString.indexOf('/'), urlString.indexOf(' ', urlString.indexOf('/')));
-        
-        
-        //  se truncan los parametros pasados por get
-        /*
-        if (urlString.indexOf('?')!=-1){
-          urlString=urlString.substring(urlString.indexOf('/'), urlString.indexOf('?', urlString.indexOf('/')));
-        }*/
+
 
         //  put what's left of the URL back in client line
 #if CASESENSE
@@ -280,182 +376,240 @@ void loop()
         String jsonOut = String();
         if (urlString!="/FAVICON.ICO"){
 
-        if (urlString!="/SAVECONFIG"){
-          if (urlString!="/CONFIG"){
-            if(pin != NULL){
+          if (urlString!="/SAVECONFIG"){
+            if (urlString!="/CONFIG"){
+              if(pin != NULL){
 #if DEBUG
-        Serial.print("Selected pin: "); 
-        Serial.println();
+                Serial.print("Selected pin: "); 
+                Serial.println();
 #endif
-              if(value != NULL){
+                if(value != NULL){
 #if DEBUG
-        Serial.print("Selected value: "); 
-        Serial.println(value);
-#endif
-
-#if DEBUG
-                //  set the pin value
-                Serial.println("setting pin");
+                  Serial.print("Selected value: "); 
+                  Serial.println(value);
 #endif
 
-                //  select the pin
-                int selectedPin = atoi (pin);
 #if DEBUG
-                Serial.println(selectedPin);
-#endif
-                //Revisar si esta bien que cambie los tipos de output input
-                //  set the pin for output
-                //pinMode(selectedPin, OUTPUT);
-
-                //  determine digital or analog (PWM)
-                if(strncmp(value, "HIGH", 4) == 0 || strncmp(value, "LOW", 3) == 0){
-
-#if DEBUG
-                  //  digital
-                  Serial.println("digital");
+                  //  set the pin value
+                  Serial.println("setting pin");
 #endif
 
-                  if(strncmp(value, "HIGH", 4) == 0){
+                  //  select the pin
+                  int selectedPin = atoi (pin);
 #if DEBUG
-                    Serial.println("HIGH");
+                  Serial.println(selectedPin);
 #endif
-                    //digitalWrite(selectedPin, HIGH);
-                    updateOutput(selectedPin, 1);
+                  //Revisar si esta bien que cambie los tipos de output input
+                  //  set the pin for output
+                  //pinMode(selectedPin, OUTPUT);
+
+                  //  determine digital or analog (PWM)
+                  if(strncmp(value, "HIGH", 4) == 0 || strncmp(value, "LOW", 3) == 0){
+
+#if DEBUG
+                    //  digital
+                    Serial.println("digital");
+#endif
+
+                    if(strncmp(value, "HIGH", 4) == 0){
+#if DEBUG
+                      Serial.println("HIGH");
+#endif
+                      //digitalWrite(selectedPin, HIGH);
+                      updateOutput(selectedPin, 1);
+                    }
+
+                    if(strncmp(value, "LOW", 3) == 0){
+#if DEBUG
+                      Serial.println("LOW");
+#endif
+                      //digitalWrite(selectedPin, LOW);
+                      updateOutput(selectedPin, 0);
+                    }
+
+                  } 
+                  else {
+
+#if DEBUG
+                    //  analog
+                    Serial.println("analog");
+#endif
+                    //  get numeric value
+                    int selectedValue = atoi(value);              
+#if DEBUG
+                    Serial.println(selectedValue);
+#endif
+                    analogWrite(selectedPin, selectedValue);
+
                   }
 
-                  if(strncmp(value, "LOW", 3) == 0){
-#if DEBUG
-                    Serial.println("LOW");
-#endif
-                    //digitalWrite(selectedPin, LOW);
-                    updateOutput(selectedPin, 0);
-                  }
-
+                  //  return status
+                  imprimirCabeceraHTTP(client, "html");
                 } 
                 else {
+#if DEBUG
+                  //  read the pin value
+                  Serial.println("reading pin");
+#endif
+
+                  //  determine analog or digital
+                  if(pin[0] == 'a' || pin[0] == 'A'){
+
+                    //  analog
+                    int selectedPin = pin[1] - '0';
 
 #if DEBUG
-                  //  analog
-                  Serial.println("analog");
+                    Serial.println(selectedPin);
+                    Serial.println("analog");
 #endif
-                  //  get numeric value
-                  int selectedValue = atoi(value);              
-#if DEBUG
-                  Serial.println(selectedValue);
-#endif
-                  analogWrite(selectedPin, selectedValue);
+                    sprintf(outValue,"%d",analogRead(selectedPin));
 
+#if DEBUG
+                    Serial.println(outValue);
+#endif
+
+                  } 
+                  else if(pin[0] != NULL) {
+
+                    //  digital
+                    int selectedPin = pin[0] - '0';
+
+#if DEBUG
+                    Serial.println(selectedPin);
+                    Serial.println("digital");
+#endif
+
+                    for ( i = 0; i < numberOfInputs; i++) {
+                      if (config[i].type==SENSOR_TEMPERATURA_TYPE){
+                        if (config[i].input==selectedPin){
+                          DHT11.read();
+                          /*
+                          String out ="<t>";
+                          out+="</t>";
+                          out+="<h>";
+                          out+="</h";
+                          //client.println(out);
+                          sprintf(outValue,"%s",out);
+                          */
+#if DEBUG                         
+                          Serial.print("Humidity (%): ");
+                          Serial.println((float)DHT11.humidity, DEC);
+
+                          Serial.print("Temperature (°C): ");
+                          Serial.println((float)DHT11.temperature, DEC);
+#endif
+                        }
+                      } 
+                      else if (config[i].type==SWITCH_TYPE){
+                        if (config[i].output==selectedPin){
+
+                          int inValue = digitalRead(selectedPin);
+
+                          if(inValue == 0){
+                            sprintf(outValue,"%s","OFF");
+                            //sprintf(outValue,"%d",digitalRead(selectedPin));
+                          }
+                          else if(inValue == 1){
+                            sprintf(outValue,"%s","ON");
+                          }
+
+                        }
+                      }                      
+                    }
+
+
+
+
+                  }
+
+                  //  assemble the json output
+                  /*jsonOut += "{\"";
+                   jsonOut += pin;
+                   jsonOut += "\":\"";*/
+                  jsonOut = "<state>";
+                  jsonOut += outValue;
+                  jsonOut += "</state>";
+                  /*jsonOut += "\"}";*/
+#if DEBUG
+                  Serial.println(outValue);
+#endif
+                  imprimirCabeceraHTTP(client, "xml");
+                  client.println(jsonOut);
+                  jsonOut="";
                 }
+              } 
+              else {
 
-                //  return status
-                client.println("HTTP/1.1 200 OK");
+                //  error
+#if DEBUG
+                Serial.println("erroring");
+#endif
+                client.println("HTTP/1.1 404 Not Found");
                 client.println("Content-Type: text/html");
                 client.println();
 
-              } 
-              else {
-#if DEBUG
-                //  read the pin value
-                Serial.println("reading pin");
-#endif
-
-                //  determine analog or digital
-                if(pin[0] == 'a' || pin[0] == 'A'){
-
-                  //  analog
-                  int selectedPin = pin[1] - '0';
-
-#if DEBUG
-                  Serial.println(selectedPin);
-                  Serial.println("analog");
-#endif
-
-                  sprintf(outValue,"%d",analogRead(selectedPin));
-
-#if DEBUG
-                  Serial.println(outValue);
-#endif
-
-                } 
-                else if(pin[0] != NULL) {
-
-                  //  digital
-                  int selectedPin = pin[0] - '0';
-
-#if DEBUG
-                  Serial.println(selectedPin);
-                  Serial.println("digital");
-#endif
-
-                  //pinMode(selectedPin, INPUT);
-
-                  int inValue = digitalRead(selectedPin);
-
-                  if(inValue == 0){
-                    sprintf(outValue,"%s","OFF");
-                    //sprintf(outValue,"%d",digitalRead(selectedPin));
-                  }
-
-                  if(inValue == 1){
-                    sprintf(outValue,"%s","ON");
-                  }
-
-
-                }
-
-                //  assemble the json output
-                /*jsonOut += "{\"";
-                jsonOut += pin;
-                jsonOut += "\":\"";*/
-                jsonOut += "<state>";
-                jsonOut += outValue;
-                jsonOut += "</state>";
-                /*jsonOut += "\"}";*/
-#if DEBUG
-                  Serial.println(outValue);
-#endif
-                //  return value with wildcarded Cross-origin policy
-                client.println("HTTP/1.1 200 OK");
-                client.println("Content-Type: application/xml");
-                client.println("Access-Control-Allow-Origin: *");
-                client.println();
-                client.println(jsonOut);
               }
-            } 
-            else {
-
-              //  error
+            }
+            else{
+              //se solicito /CONFIG
 #if DEBUG
-              Serial.println("erroring");
-#endif
-              client.println("HTTP/1.1 404 Not Found");
-              client.println("Content-Type: text/html");
-              client.println();
-
+              Serial.println("Pedido de config");
+#endif              
+              imprimirCabeceraHTTP(client, "json");
+              client.println(configToJson());
             }
           }
           else{
-            //se solicito /CONFIG
-            client.println("HTTP/1.1 200 OK");
-            client.println("Content-Type: application/json");
-            client.println("Access-Control-Allow-Origin: *");
-            client.println();
-            client.println(configToJson());
+            //se solicito /SAVECONFIG
+            imprimirCabeceraHTTP(client, "html");
+            client.println("Configuracion guardada con exito");
+
+
+            int indexBgn = 0;          
+            int indexEnd = 0;
+            String param;
+            String value;
+            int slot;
+            while (indexEnd!=-1){
+              indexEnd = urlStringParams.indexOf("=",indexBgn);             
+              param = urlStringParams.substring(indexBgn, indexEnd);
+              indexBgn = indexEnd+1;
+              indexEnd = urlStringParams.indexOf("&",indexBgn);
+              if (indexEnd!=-1){
+                value = urlStringParams.substring(indexBgn, indexEnd);
+                indexBgn=indexEnd +1;
+              }
+              else{
+                value = urlStringParams.substring(indexBgn, urlStringParams.length());
+              }  
+#if DEBUG
+              Serial.print("param: ");
+              Serial.println(param);
+              Serial.print("value: ");
+              Serial.println(value);
+#endif         
+              if (param=="slot"){
+                slot = value.toInt();
+              }
+              else if (param == "n"){
+                value.toCharArray(config[slot].name,20);                
+              }
+              else if (param == "i"){
+                config[slot].input = value.toInt();
+              }
+              else if (param == "o"){
+                config[slot].output = value.toInt();
+              }
+              else if (param == "s"){
+                config[slot].state = value.toInt();
+              }
+              else if (param == "t"){
+                config[slot].type = value.toInt();
+              }
+            }
+            EEPROM.writeBlock(address, config);
+
           }
-        }
-        else{
-          //se solicito /SAVECONFIG
-          client.println("HTTP/1.1 200 OK");
-          client.println("Content-Type: text/html");
-          client.println("Access-Control-Allow-Origin: *");
-          client.println();
-          client.println("Configuracion guardada con exito");
-          
-          while(client.available())
-          {
-             Serial.write(client.read());
-          }
-        }
         }
         break;
       }
@@ -472,4 +626,22 @@ void loop()
     }
   }
 }
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
